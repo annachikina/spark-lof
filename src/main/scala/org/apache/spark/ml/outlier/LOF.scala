@@ -147,7 +147,7 @@ class LOF(
     SchemaUtils.checkColumnType(schema, ${featuresCol}, new VectorUDT())
 
     StructType(Array(
-      StructField(LOF.index,
+      StructField($(indexColumn),
         DataTypes.LongType,
         nullable = false),
       StructField(LOF.lof,
