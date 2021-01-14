@@ -29,7 +29,7 @@ import org.apache.spark.sql.{DataFrame, Dataset, Row}
 import scala.collection.mutable.ArrayBuffer
 
 private[ml] trait LOFParams extends Params
-    with HasFeaturesCol with HasOutputCol {
+  with HasFeaturesCol with HasOutputCol {
 
   /**
     * The minimum number of points.
@@ -45,10 +45,15 @@ private[ml] trait LOFParams extends Params
     this, "distType", "the type of distance"
   )
   setDefault(distType -> LOF.euclidean)
+
+  final val indexColumn = new Param[String](
+    this, "indexColumn", "the name of index col"
+  )
+  setDefault(indexColumn -> "index")
 }
 
 class LOF(
-    override val uid: String) extends Transformer with LOFParams {
+           override val uid: String) extends Transformer with LOFParams {
 
   def this() = this(Identifiable.randomUID("lof"))
 
@@ -62,14 +67,23 @@ class LOF(
     require(value > 0, "minPts must be a positive integer.")
     set(minPts, value)
   }
+  def setIndexCol(value: String): this.type = {
+    set(indexColumn, value)
+  }
 
   override def transform(dataset: Dataset[_]): DataFrame = {
-    val input = dataset.select(col($(featuresCol))).rdd.map {
-      case Row(vec: Vector) => vec
+    println("input dataset")
+    dataset.show()
+    println("featuresCol", $(featuresCol))
+    val input = dataset.select(col($(indexColumn)), col($(featuresCol))).rdd.map {
+      case Row(idx: Long, vec: Vector) => (idx, vec)
     }
+    val indexedPointsRDD = input.persist()
+
     val session = dataset.sparkSession
     val sc = session.sparkContext
-    val indexedPointsRDD = input.zipWithIndex().map(_.swap).persist()
+    println("indexedPointsRDD")
+    indexedPointsRDD.collect().foreach(println(_))
     val numPartitionsOfIndexedPointsRDD = indexedPointsRDD.getNumPartitions
 
     // compute k-distance neighborhood of each point
@@ -92,23 +106,27 @@ class LOF(
         buf.iterator
       }.reduceByKey(combineNeighborhood)
     }.reduce(_.union(_))
+    println("neighborhoodRDD")
+    neighborhoodRDD.collect().foreach(println(_))
 
     val swappedRDD = neighborhoodRDD.flatMap {
-        case (outIdx: Long, neighborhood: Array[(Long, Double)]) =>
-      neighborhood.map { case (inIdx: Long, dist: Double) =>
-        (inIdx, (outIdx, dist))
-      } :+ (outIdx, (outIdx, 0d))
+      case (outIdx: Long, neighborhood: Array[(Long, Double)]) =>
+        neighborhood.map { case (inIdx: Long, dist: Double) =>
+          (inIdx, (outIdx, dist))
+        } :+ (outIdx, (outIdx, 0d))
     }.groupByKey().persist()
+    println("swappedRDD")
+    swappedRDD.collect().foreach(println(_))
 
     val localOutlierFactorRDD = swappedRDD.cogroup(neighborhoodRDD)
-    .flatMap { case (outIdx: Long,
-    (k: Iterable[Iterable[(Long, Double)]], v: Iterable[Array[(Long, Double)]])) =>
-      require(k.size == 1 && v.size == 1)
-      val kDistance = v.head.last._2
-      k.head.filter(_._1 != outIdx).map { case (inIdx: Long, dist: Double) =>
-        (inIdx, (outIdx, Math.max(dist, kDistance)))
-      }
-    }.groupByKey().map { case (idx: Long, iter: Iterable[(Long, Double)]) =>
+      .flatMap { case (outIdx: Long,
+      (k: Iterable[Iterable[(Long, Double)]], v: Iterable[Array[(Long, Double)]])) =>
+        require(k.size == 1 && v.size == 1)
+        val kDistance = v.head.last._2
+        k.head.filter(_._1 != outIdx).map { case (inIdx: Long, dist: Double) =>
+          (inIdx, (outIdx, Math.max(dist, kDistance)))
+        }
+      }.groupByKey().map { case (idx: Long, iter: Iterable[(Long, Double)]) =>
       val num = iter.size
       val sum = iter.map(_._2).sum
       (idx, num / sum)
@@ -125,6 +143,8 @@ class LOF(
       val sum = iter.filter(_._1 != idx).map(_._2).sum
       (idx, sum / lrd / (iter.size - 1))
     }
+    println("lofRDD")
+    localOutlierFactorRDD.collect().foreach(println(_))
 
     val finalRDD = localOutlierFactorRDD.join(indexedPointsRDD)
       .map(r => Row(r._1, r._2._1, r._2._2))
@@ -140,14 +160,14 @@ class LOF(
     StructType(Array(
       StructField(LOF.index,
         DataTypes.LongType,
-        false),
+        nullable = false),
       StructField(LOF.lof,
         DataTypes.DoubleType,
-        false),
+        nullable = false),
       StructField(LOF.vector,
         new VectorUDT(),
-        false)
-      )
+        nullable = false)
+    )
     )
   }
 
@@ -162,10 +182,10 @@ class LOF(
     * @return
     */
   def computeKDistanceNeighborhood(
-      data: Array[(Long, Vector)],
-      target: Vector,
-      k: Int,
-      distType: String): Array[(Long, Double)] = {
+                                    data: Array[(Long, Vector)],
+                                    target: Vector,
+                                    k: Int,
+                                    distType: String): Array[(Long, Double)] = {
     /**
       * Move elements in data from the start position to right by one unit.
       *
@@ -249,8 +269,8 @@ class LOF(
     * @return
     */
   def combineNeighborhood(
-      first: Array[(Long, Double)],
-      second: Array[(Long, Double)]): Array[(Long, Double)] = {
+                           first: Array[(Long, Double)],
+                           second: Array[(Long, Double)]): Array[(Long, Double)] = {
 
     var pos1 = 0
     var pos2 = 0
@@ -258,34 +278,34 @@ class LOF(
     val combined = new ArrayBuffer[(Long, Double)]()
 
     while (pos1 < first.length && pos2 < second.length && count < $(minPts)) {
-        if (first(pos1)._2 == second(pos2)._2) {
-          combined.append(first(pos1))
-          pos1 += 1
-          if (combined.length == 1) {
-            count += 1
-          } else {
-            if (combined(combined.length - 1) != combined(combined.length - 2)) {
-              count += 1
-            }
-          }
-          combined.append(second(pos2))
-          pos2 += 1
+      if (first(pos1)._2 == second(pos2)._2) {
+        combined.append(first(pos1))
+        pos1 += 1
+        if (combined.length == 1) {
+          count += 1
         } else {
-          if (first(pos1)._2 < second(pos2)._2) {
-            combined.append(first(pos1))
-            pos1 += 1
-          } else {
-            combined.append(second(pos2))
-            pos2 += 1
-          }
-          if (combined.length == 1) {
+          if (combined(combined.length - 1) != combined(combined.length - 2)) {
             count += 1
-          } else {
-            if (combined(combined.length - 1) != combined(combined.length - 2)) {
-              count += 1
-            }
           }
         }
+        combined.append(second(pos2))
+        pos2 += 1
+      } else {
+        if (first(pos1)._2 < second(pos2)._2) {
+          combined.append(first(pos1))
+          pos1 += 1
+        } else {
+          combined.append(second(pos2))
+          pos2 += 1
+        }
+        if (combined.length == 1) {
+          count += 1
+        } else {
+          if (combined(combined.length - 1) != combined(combined.length - 2)) {
+            count += 1
+          }
+        }
+      }
     }
 
     while (pos1 < first.length && count < $(minPts)) {
