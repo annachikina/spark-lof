@@ -72,9 +72,6 @@ class LOF(
   }
 
   override def transform(dataset: Dataset[_]): DataFrame = {
-    println("input dataset")
-    dataset.show()
-    println("featuresCol", $(featuresCol))
     val input = dataset.select(col($(indexColumn)), col($(featuresCol))).rdd.map {
       case Row(idx: Long, vec: Vector) => (idx, vec)
     }
@@ -82,8 +79,6 @@ class LOF(
 
     val session = dataset.sparkSession
     val sc = session.sparkContext
-    println("indexedPointsRDD")
-    indexedPointsRDD.collect().foreach(println(_))
     val numPartitionsOfIndexedPointsRDD = indexedPointsRDD.getNumPartitions
 
     // compute k-distance neighborhood of each point
@@ -106,8 +101,6 @@ class LOF(
         buf.iterator
       }.reduceByKey(combineNeighborhood)
     }.reduce(_.union(_))
-    println("neighborhoodRDD")
-    neighborhoodRDD.collect().foreach(println(_))
 
     val swappedRDD = neighborhoodRDD.flatMap {
       case (outIdx: Long, neighborhood: Array[(Long, Double)]) =>
@@ -115,8 +108,6 @@ class LOF(
           (inIdx, (outIdx, dist))
         } :+ (outIdx, (outIdx, 0d))
     }.groupByKey().persist()
-    println("swappedRDD")
-    swappedRDD.collect().foreach(println(_))
 
     val localOutlierFactorRDD = swappedRDD.cogroup(neighborhoodRDD)
       .flatMap { case (outIdx: Long,
@@ -143,8 +134,6 @@ class LOF(
       val sum = iter.filter(_._1 != idx).map(_._2).sum
       (idx, sum / lrd / (iter.size - 1))
     }
-    println("lofRDD")
-    localOutlierFactorRDD.collect().foreach(println(_))
 
     val finalRDD = localOutlierFactorRDD.join(indexedPointsRDD)
       .map(r => Row(r._1, r._2._1, r._2._2))
